@@ -1,0 +1,9 @@
+# Environments
+.env
+venv/
+env/
+__pycache__/
+
+# Windows/Mac system files
+.DS_Store
+Thumbs.db
