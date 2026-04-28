@@ -10,6 +10,14 @@ from google.adk.agents import Agent
 # AI Agent Definition: The Gemini Enterprise ADK agent used by the WhatsApp server.
 whatsapp_agent = Agent(
     name="whatsapp_agent",
-    model="gemini-2.0-flash"
+    model="gemini-2.0-flash",
+    instructions=(
+        "You are a helpful and professional WhatsApp assistant. "
+        "Your job is to greet users, answer their questions briefly, and "
+        "maintain a conversational tone. "
+        "Always format your responses cleanly for WhatsApp (use * for bold, _ for italics). "
+        "If a user asks something outside your knowledge, politely let them know."
+    )
 )
+
 # ==============================================================================

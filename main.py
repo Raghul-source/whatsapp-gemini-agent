@@ -20,6 +20,7 @@ from agent import whatsapp_agent
 # Snippet Source: https://docs.cloud.google.com/gemini-enterprise-agent-platform/build/runtime/quickstart-adk?authuser=2
 # 1. Correct Official Runtime Import for Gemini Enterprise ADK
 from google.adk.runtime import Runner 
+from google.adk.sessions import VertexAiSessionService
 # ==============================================================================
 
 # Load environment variables
@@ -41,8 +42,10 @@ os.environ.setdefault("GOOGLE_CLOUD_PROJECT", GCP_PROJECT_ID)
 
 app = FastAPI(title="WhatsApp Gemini Agent Webhook")
 
-# Initialize the pure ADK Runner
-runner = Runner(agent=whatsapp_agent)
+
+# Initialize the ADK Runner with Google Cloud memory
+cloud_memory = VertexAiSessionService(agent_engine_id=os.getenv("AGENT_ENGINE_ID"))
+runner = Runner(agent=whatsapp_agent, session_service=cloud_memory)
 
 # ==============================================================================
 
@@ -108,7 +111,7 @@ async def receive_message(request: Request):
         
         # We must gather the async events to get the final message text
         final_response = ""
-        async for event in runner.run_async(user_id=phone_number, input=message_text):
+        async for event in runner.run_async(user_id=phone_number, session_id=phone_number, input=message_text):
             if event.output:
                 final_response = event.output
         
