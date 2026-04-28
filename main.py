@@ -14,11 +14,11 @@ from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import PlainTextResponse
 from dotenv import load_dotenv
 import requests
+from agent import whatsapp_agent
 
 # ==============================================================================
 # Snippet Source: https://docs.cloud.google.com/gemini-enterprise-agent-platform/build/runtime/quickstart-adk?authuser=2
-# 1. Correct Official Imports for Gemini Enterprise ADK
-from google.adk.agents import Agent
+# 1. Correct Official Runtime Import for Gemini Enterprise ADK
 from google.adk.runtime import Runner 
 # ==============================================================================
 
@@ -41,16 +41,8 @@ os.environ.setdefault("GOOGLE_CLOUD_PROJECT", GCP_PROJECT_ID)
 
 app = FastAPI(title="WhatsApp Gemini Agent Webhook")
 
-# ==============================================================================
-# Snippet Source: https://docs.cloud.google.com/gemini-enterprise-agent-platform/build/runtime/quickstart-adk?authuser=2
-# 2. Correct Official Agent Initialization
-agent = Agent(
-    name="whatsapp_agent",
-    model="gemini-2.0-flash" 
-)
-
 # Initialize the pure ADK Runner
-runner = Runner(agent=agent)
+runner = Runner(agent=whatsapp_agent)
 
 # ==============================================================================
 
