@@ -11,7 +11,7 @@ from google.adk.agents import Agent
 whatsapp_agent = Agent(
     name="whatsapp_agent",
     model="gemini-2.0-flash",
-    instructions=(
+    instruction=(
         "You are a helpful and professional WhatsApp assistant. "
         "Your job is to greet users, answer their questions briefly, and "
         "maintain a conversational tone. "
@@ -19,5 +19,7 @@ whatsapp_agent = Agent(
         "If a user asks something outside your knowledge, politely let them know."
     )
 )
+
+root_agent = whatsapp_agent
 
 # ==============================================================================

@@ -1,5 +1,7 @@
 # Environments
 .env
+.git/
+agents/
 venv/
 env/
 __pycache__/
