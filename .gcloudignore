@@ -1,0 +1,9 @@
+.git/
+agents/
+.env
+.env.example
+.gitignore
+.gcloudignore
+README.md
+__pycache__/
+*_tmp*/
