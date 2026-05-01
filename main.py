@@ -7,6 +7,8 @@
 # 5. ADK Session Management: https://adk.dev/run/resume-agents
 # 6. Meta Send Message API: https://developers.facebook.com/docs/whatsapp/cloud-api/guides/send-messages
 # 7. Official Agent Platform Samples Repo: https://github.com/Google-Cloud-AI/agent-platform
+# 8. ADK App Sessions: https://docs.cloud.google.com/agent-builder/agent-engine/develop/adk
+# 9. AdkApp API Reference: https://docs.cloud.google.com/python/docs/reference/vertexai/latest/vertexai.agent_engines.AdkApp
 # ==============================================================================
 
 import os
@@ -17,11 +19,9 @@ import requests
 from agent import whatsapp_agent
 
 # ==============================================================================
-# Snippet Source: https://docs.cloud.google.com/gemini-enterprise-agent-platform/build/runtime/quickstart-adk?authuser=2
-# 1. Correct Official Runtime Import for Gemini Enterprise ADK
-from google.adk.runners import Runner
-from google.adk.sessions import VertexAiSessionService
-from google.genai import types
+# Snippet Source: https://docs.cloud.google.com/agent-builder/agent-engine/develop/adk
+# Official ADK App wrapper for Agent Platform sessions.
+from vertexai.agent_engines import AdkApp
 # ==============================================================================
 
 # Load environment variables
@@ -49,24 +49,18 @@ app = FastAPI(title="WhatsApp Gemini Agent Webhook")
 
 APP_NAME = "whatsapp_gemini_agent"
 
-# Initialize the ADK Runner with Google Cloud memory
-cloud_memory = VertexAiSessionService(
-    project=GCP_PROJECT_ID,
-    location=LOCATION_ID,
-    agent_engine_id=AGENT_ENGINE_ID
-)
-runner = Runner(
+# Initialize the ADK App. The official AdkApp template uses local sessions while
+# testing locally and managed Agent Platform sessions after deployment.
+adk_app = AdkApp(
     agent=whatsapp_agent,
-    app_name=APP_NAME,
-    session_service=cloud_memory
+    app_name=APP_NAME
 )
 
 # ==============================================================================
 
 async def ensure_user_session(phone_number: str):
     try:
-        session = await cloud_memory.get_session(
-            app_name=APP_NAME,
+        session = await adk_app.async_get_session(
             user_id=phone_number,
             session_id=phone_number
         )
@@ -78,8 +72,7 @@ async def ensure_user_session(phone_number: str):
         print(f"ADK get_session failed for {phone_number}: {type(e).__name__}: {e}")
 
     try:
-        session = await cloud_memory.create_session(
-            app_name=APP_NAME,
+        session = await adk_app.async_create_session(
             user_id=phone_number,
             session_id=phone_number
         )
@@ -88,8 +81,7 @@ async def ensure_user_session(phone_number: str):
     except Exception as e:
         print(f"ADK create_session failed for {phone_number}: {type(e).__name__}: {e}")
         print(f"ADK retrying get_session after create failure for {phone_number}")
-        session = await cloud_memory.get_session(
-            app_name=APP_NAME,
+        session = await adk_app.async_get_session(
             user_id=phone_number,
             session_id=phone_number
         )
@@ -97,31 +89,42 @@ async def ensure_user_session(phone_number: str):
         return session
 
 
+def extract_event_text(event) -> str:
+    if isinstance(event, dict):
+        content = event.get("content") or {}
+        parts = content.get("parts") or []
+        return "".join(part.get("text", "") for part in parts if isinstance(part, dict))
+
+    if getattr(event, "output", None):
+        return event.output
+
+    if getattr(event, "content", None) and event.content.parts:
+        return "".join(
+            part.text for part in event.content.parts if getattr(part, "text", None)
+        )
+
+    return ""
+
+
 async def process_agent_and_reply(phone_number: str, message_text: str):
     try:
         # ==============================================================================
-        # Concept Source: https://adk.dev/run/resume-agents
+        # Concept Source: https://docs.cloud.google.com/agent-builder/agent-engine/develop/adk
         # 4. Correct Official State Management (The "Memory" Rule)
-        # We use the ADK Runner, passing the phone number as 'user_id' to isolate state.
+        # We use AdkApp sessions, passing the phone number as 'user_id' and
+        # 'session_id' to isolate each WhatsApp user's state.
         await ensure_user_session(phone_number)
         
         # We must gather the async events to get the final message text
         final_response = ""
-        user_message = types.Content(
-            role="user",
-            parts=[types.Part(text=message_text)]
-        )
-        async for event in runner.run_async(
+        async for event in adk_app.async_stream_query(
+            message=message_text,
             user_id=phone_number,
-            session_id=phone_number,
-            new_message=user_message
+            session_id=phone_number
         ):
-            if getattr(event, "output", None):
-                final_response = event.output
-            elif getattr(event, "content", None) and event.content.parts:
-                final_response = "".join(
-                    part.text for part in event.content.parts if getattr(part, "text", None)
-                )
+            event_text = extract_event_text(event)
+            if event_text:
+                final_response = event_text
         
         print(f"Isolated ADK Agent response for {phone_number}: {final_response}")
         
