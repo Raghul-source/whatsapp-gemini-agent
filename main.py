@@ -1,30 +1,40 @@
 # ==============================================================================
 # OFFICIAL GOOGLE & META DOCUMENTATION REFERRED:
-# 1. ADK Quickstart: https://docs.cloud.google.com/gemini-enterprise-agent-platform/build/runtime/quickstart-adk?authuser=2
-# 2. Meta Webhooks: https://developers.facebook.com/docs/whatsapp/cloud-api/guides/set-up-webhooks
-# 3. Web Server Infrastructure: https://fastapi.tiangolo.com/tutorial/first-steps/
-# 4. Meta Webhook Setup Video: https://www.youtube.com/watch?v=N5LLmBtcfCs
-# 5. ADK Session Management: https://adk.dev/run/resume-agents
-# 6. Meta Send Message API: https://developers.facebook.com/docs/whatsapp/cloud-api/guides/send-messages
-# 7. Official Agent Platform Samples Repo: https://github.com/Google-Cloud-AI/agent-platform
+# 1. Official Agent Platform Samples Repo: https://github.com/Google-Cloud-AI/agent-platform
+# 2. ADK Python Samples Setup: https://github.com/google/adk-samples/tree/main/python
+#    Used setup ideas: Python ADK project structure, .env configuration,
+#    Google Cloud project/location variables, and separate agent definition.
 # ==============================================================================
 
 import os
+
+# Source: https://fastapi.tiangolo.com/tutorial/first-steps/
+# Source: https://fastapi.tiangolo.com/tutorial/background-tasks/
 from fastapi import BackgroundTasks, FastAPI, Request, HTTPException
 from fastapi.responses import PlainTextResponse
+# Used for FastAPI routes/request handling and BackgroundTasks so Meta gets 200 OK quickly while the agent reply runs after.
+
+# Source: https://saurabh-kumar.com/python-dotenv/
 from dotenv import load_dotenv
+# Used to load values from the .env file into Python so os.getenv(...) can read tokens, phone ID, project ID, and related settings.
+
+# Source: https://requests.readthedocs.io/en/latest/user/quickstart/#make-a-request
 import requests
+# Used to send HTTP requests from Python; here it sends the agent's final reply to Meta WhatsApp API using requests.post(...).
+
+
+# We import the whatsapp_agent variable from agent.py to connect this webhook with our ADK agent.
 from agent import whatsapp_agent
 
+
+
 # ==============================================================================
-# Snippet Source: https://docs.cloud.google.com/gemini-enterprise-agent-platform/build/runtime/quickstart-adk?authuser=2
-# 1. Correct Official Runtime Import for Gemini Enterprise ADK
-from google.adk.runners import Runner
-from google.adk.sessions import VertexAiSessionService
-from google.genai import types
+# ADK App connects our ADK agent to Agent Platform session handling.
+from vertexai.agent_engines import AdkApp
 # ==============================================================================
 
-# Load environment variables
+# Source: https://saurabh-kumar.com/python-dotenv/#getting-started
+# Load environment variables.
 load_dotenv()
 
 def get_required_env(name: str) -> str:
@@ -40,33 +50,34 @@ GCP_PROJECT_ID = get_required_env("GCP_PROJECT_ID")
 LOCATION_ID = get_required_env("LOCATION_ID")
 AGENT_ENGINE_ID = get_required_env("AGENT_ENGINE_ID")
 
-# Make the Google Cloud project available to ADK / Google client libraries.
-os.environ.setdefault("GOOGLE_CLOUD_PROJECT", GCP_PROJECT_ID)
-os.environ.setdefault("GOOGLE_CLOUD_LOCATION", LOCATION_ID)
+# Source: https://google.github.io/adk-docs/get-started/quickstart/
+# Tell ADK/GenAI to use the Google Cloud Vertex AI backend.
 os.environ.setdefault("GOOGLE_GENAI_USE_VERTEXAI", "TRUE")
 
+# Source: https://fastapi.tiangolo.com/tutorial/first-steps/
 app = FastAPI(title="WhatsApp Gemini Agent Webhook")
 
 APP_NAME = "whatsapp_gemini_agent"
 
-# Initialize the ADK Runner with Google Cloud memory
-cloud_memory = VertexAiSessionService(
-    project=GCP_PROJECT_ID,
-    location=LOCATION_ID,
-    agent_engine_id=AGENT_ENGINE_ID
-)
-runner = Runner(
+# Source: https://docs.cloud.google.com/agent-builder/agent-engine/develop/adk
+# Runtime background: https://github.com/GoogleCloudPlatform/generative-ai/blob/main/gemini/agent-engine/intro_agent_engine.ipynb
+# Explains the managed Agent Runtime idea for deploying and serving agents.
+# Initialize the ADK App. The official AdkApp template uses local sessions while
+# testing locally and managed Agent Platform sessions after deployment.
+# This script connects our AI agent to the web to process incoming messages. It automatically remembers separate chat histories for every WhatsApp user based on their phone number.
+adk_app = AdkApp(
     agent=whatsapp_agent,
-    app_name=APP_NAME,
-    session_service=cloud_memory
+    app_name=APP_NAME
 )
 
 # ==============================================================================
 
+# Depending on the phone number, retrieve the existing session or create a new one.
 async def ensure_user_session(phone_number: str):
+    # Source: https://google.github.io/adk-docs/sessions/session/
+    # A session is scoped by user_id and session_id so each WhatsApp user is isolated.
     try:
-        session = await cloud_memory.get_session(
-            app_name=APP_NAME,
+        session = await adk_app.async_get_session(
             user_id=phone_number,
             session_id=phone_number
         )
@@ -78,8 +89,7 @@ async def ensure_user_session(phone_number: str):
         print(f"ADK get_session failed for {phone_number}: {type(e).__name__}: {e}")
 
     try:
-        session = await cloud_memory.create_session(
-            app_name=APP_NAME,
+        session = await adk_app.async_create_session(
             user_id=phone_number,
             session_id=phone_number
         )
@@ -88,45 +98,55 @@ async def ensure_user_session(phone_number: str):
     except Exception as e:
         print(f"ADK create_session failed for {phone_number}: {type(e).__name__}: {e}")
         print(f"ADK retrying get_session after create failure for {phone_number}")
-        session = await cloud_memory.get_session(
-            app_name=APP_NAME,
+        session = await adk_app.async_get_session(
             user_id=phone_number,
             session_id=phone_number
         )
         print(f"ADK session found after retry for {phone_number}")
         return session
 
+# Source: https://docs.cloud.google.com/python/docs/reference/vertexai/latest/vertexai.agent_engines.AdkApp
+# Extract only the response information from ADK events before sending it to Meta.
+def extract_event_text(event) -> str:
+    if isinstance(event, dict):
+        content = event.get("content") or {}
+        parts = content.get("parts") or []
+        return "".join(part.get("text", "") for part in parts if isinstance(part, dict))
+
+    if getattr(event, "output", None):
+        return event.output
+
+    if getattr(event, "content", None) and event.content.parts:
+        return "".join(
+            part.text for part in event.content.parts if getattr(part, "text", None)
+        )
+
+    return ""
 
 async def process_agent_and_reply(phone_number: str, message_text: str):
     try:
         # ==============================================================================
-        # Concept Source: https://adk.dev/run/resume-agents
         # 4. Correct Official State Management (The "Memory" Rule)
-        # We use the ADK Runner, passing the phone number as 'user_id' to isolate state.
+        # We use AdkApp sessions, passing the phone number as 'user_id' and
+        # 'session_id' to isolate each WhatsApp user's state.
         await ensure_user_session(phone_number)
         
         # We must gather the async events to get the final message text
         final_response = ""
-        user_message = types.Content(
-            role="user",
-            parts=[types.Part(text=message_text)]
-        )
-        async for event in runner.run_async(
+        async for event in adk_app.async_stream_query(
+            message=message_text,
             user_id=phone_number,
-            session_id=phone_number,
-            new_message=user_message
+            session_id=phone_number
         ):
-            if getattr(event, "output", None):
-                final_response = event.output
-            elif getattr(event, "content", None) and event.content.parts:
-                final_response = "".join(
-                    part.text for part in event.content.parts if getattr(part, "text", None)
-                )
+            event_text = extract_event_text(event)
+            if event_text:
+                final_response = event_text
         
         print(f"Isolated ADK Agent response for {phone_number}: {final_response}")
         
         # ==============================================================================
         # OFFICIAL SOURCE: https://developers.facebook.com/docs/whatsapp/cloud-api/guides/send-messages
+        # REQUESTS SOURCE: https://requests.readthedocs.io/en/latest/user/quickstart/#more-complicated-post-requests
         # 5. Send the AI's response back to the user's WhatsApp
         # ==============================================================================
         meta_url = f"https://graph.facebook.com/v18.0/{META_PHONE_ID}/messages"
