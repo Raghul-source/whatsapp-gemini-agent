@@ -1,13 +1,7 @@
 # Setup and Execution Guide
 
-## 1. gcloud Installer - Local Machine Prerequisite
+## 1. Local Machine Prerequisite
 
-Ignore this step if Google Cloud SDK is already installed.
-
-```powershell
-(New-Object Net.WebClient).DownloadFile("https://dl.google.com/dl/cloudsdk/channels/rapid/GoogleCloudSDKInstaller.exe", "$env:Temp\GoogleCloudSDKInstaller.exe")
-& $env:Temp\GoogleCloudSDKInstaller.exe
-```
 
 Log in and set the project:
 
@@ -35,6 +29,8 @@ Confirmed server path:
 ```text
 /home/raghul/whatsapp-agent
 ```
+Example: `/home/<linux-username>/whatsapp-agent`
+
 
 ## 3. Clone And Access The Repository
 
@@ -80,7 +76,7 @@ META_VERIFY_TOKEN=<your_meta_verify_token>
 META_ACCESS_TOKEN=<your_meta_access_token>
 META_PHONE_ID=<your_whatsapp_phone_number_id>
 
-GCP_PROJECT_ID=framebyframe-agents-480720
+GCP_PROJECT_ID=<your-project-id>
 LOCATION_ID=us-central1
 AGENT_ENGINE_ID=<your_agent_runtime_id>
 GOOGLE_GENAI_USE_VERTEXAI=TRUE
@@ -98,7 +94,7 @@ Run Application Default Credentials login on the server:
 
 ```bash
 gcloud auth application-default login
-gcloud config set project framebyframe-agents-480720
+gcloud config set project <your-project-id>
 sudo systemctl restart whatsapp-agent
 ```
 
@@ -141,6 +137,8 @@ sudo nano /etc/systemd/system/whatsapp-agent.service
 ```
 
 Current service configuration:
+
+Replace `raghul` with your Linux username if different.
 
 ```ini
 [Unit]
