@@ -2,9 +2,6 @@
 # Tells the system to use the Bash shell to run this script.
 set -euo pipefail
 # Safety feature: stops the script immediately if an error occurs or a required variable is missing.
-export CLOUDSDK_COMPUTE_SSH=ssh
-# Forces gcloud inside Git Bash to use standard ssh instead of Windows plink.exe.
-
 # ==============================================================================
 # Deploy WhatsApp Gemini Agent from a laptop to the server.
 #
@@ -40,6 +37,8 @@ APP_DIR="${APP_DIR:-/opt/whatsapp-agent}"
 # Sets the install destination under /opt so the app is not installed inside a personal login folder.
 APP_USER="${APP_USER:-}"
 # Defines the Linux user that runs the app; if empty, the script detects the remote login user automatically.
+SSH_USER="${SSH_USER:-}"
+# Defines the SSH username for gcloud; if empty, the script derives it from the active Google account.
 SERVICE_NAME="${SERVICE_NAME:-whatsapp-agent}"
 # Defines the background service name used to start, stop, restart, and check the app.
 APP_ENV_FILE="${APP_ENV_FILE:-./.env}"
@@ -50,8 +49,14 @@ APP_HOST="${APP_HOST:-0.0.0.0}"
 # Defines the host address uvicorn listens on.
 APP_PORT="${APP_PORT:-8085}"
 # Defines the port uvicorn listens on.
-USE_IAP_TUNNEL="${USE_IAP_TUNNEL:-true}"
-# Uses Google Cloud IAP tunneling for SSH/SCP so deployment can work even when direct port 22 is blocked.
+USE_IAP_TUNNEL="false"
+# Uses direct SSH/SCP through the VM external IP.
+GCLOUD_QUICK_TIMEOUT="${GCLOUD_QUICK_TIMEOUT:-60s}"
+# Maximum time allowed for quick gcloud checks before the script stops with a clear error.
+GCLOUD_CONNECT_TIMEOUT="${GCLOUD_CONNECT_TIMEOUT:-120s}"
+# Maximum time allowed for SSH/SCP connection checks before the script stops with a clear error.
+GCLOUD_DEPLOY_TIMEOUT="${GCLOUD_DEPLOY_TIMEOUT:-20m}"
+# Maximum time allowed for the real remote deployment step.
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 # Defines the Linux systemd path where the service file must be saved.
 
@@ -65,22 +70,27 @@ require_command() {
 
 require_command gcloud
 require_command git
+require_command ssh
+require_command scp
 
-# Source: https://cloud.google.com/sdk/gcloud/reference/config/set
-# Forces gcloud on Windows to use standard ssh instead of plink.exe for SSH/SCP operations.
-gcloud config set compute/ssh_executable ssh >/dev/null 2>&1 || true
+run_with_timeout() {
+  # Runs a command with timeout when Git Bash provides the timeout command.
+  local duration="$1"
+  shift
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "${duration}" "$@"
+  else
+    "$@"
+  fi
+}
 
-if command -v cmd.exe >/dev/null 2>&1 && [ -x "/c/Program Files/Git/usr/bin/ssh.exe" ]; then
-  # Source: https://learn.microsoft.com/windows-server/administration/windows-commands/setx
-  # Persists the Git Bash OpenSSH path for Windows gcloud so future terminals stop using plink.exe.
-  cmd.exe /c setx CLOUDSDK_COMPUTE_SSH "C:\\Program Files\\Git\\usr\\bin\\ssh.exe" >/dev/null 2>&1 || true
-  export CLOUDSDK_COMPUTE_SSH="C:\\Program Files\\Git\\usr\\bin\\ssh.exe"
-fi
+echo "Preparing deployment..."
 
 if [ -z "${GCP_PROJECT}" ]; then
   # Source: https://cloud.google.com/sdk/gcloud/reference/config/get-value
   # Detects the active Google Cloud project from the laptop's gcloud configuration.
-  GCP_PROJECT="$(gcloud config get-value project 2>/dev/null || true)"
+  echo "Detecting active Google Cloud project..."
+  GCP_PROJECT="$(run_with_timeout "${GCLOUD_QUICK_TIMEOUT}" gcloud config get-value project 2>/dev/null || true)"
   if [ -z "${GCP_PROJECT}" ] || [ "${GCP_PROJECT}" = "(unset)" ]; then
     echo "ERROR: GCP_PROJECT is empty and no active gcloud project is configured."
     echo "Set a project with: gcloud config set project <project-id>"
@@ -101,7 +111,8 @@ fi
 if [ -z "${GCP_INSTANCE}" ] || [ -z "${GCP_ZONE}" ]; then
   # Source: https://cloud.google.com/sdk/gcloud/reference/compute/instances/list
   # Finds available Compute Engine VM names and zones from the selected project.
-  VM_LIST="$(gcloud compute instances list --project "${GCP_PROJECT}" --format='value(name,zone)' 2>/dev/null || true)"
+  echo "Detecting Compute Engine VM..."
+  VM_LIST="$(run_with_timeout "${GCLOUD_QUICK_TIMEOUT}" gcloud compute instances list --project "${GCP_PROJECT}" --format='value(name,zone)' 2>/dev/null || true)"
   if [ -z "${VM_LIST}" ]; then
     echo "ERROR: No Compute Engine VM instances found in project: ${GCP_PROJECT}"
     exit 1
@@ -134,9 +145,28 @@ if [ -z "${GCP_INSTANCE}" ] || [ -z "${GCP_ZONE}" ]; then
   fi
 fi
 
+if [ -z "${SSH_USER}" ]; then
+  # Source: https://cloud.google.com/sdk/gcloud/reference/config/get-value
+  # Derives a valid Linux SSH username from the active Google Cloud account.
+  ACTIVE_ACCOUNT="$(run_with_timeout "${GCLOUD_QUICK_TIMEOUT}" gcloud config get-value account 2>/dev/null || true)"
+  SSH_USER="$(printf '%s' "${ACTIVE_ACCOUNT%%@*}" \
+    | tr '[:upper:]' '[:lower:]' \
+    | sed 's/[^a-z0-9_-]/_/g')"
+
+  if [ -z "${SSH_USER}" ] || [ "${SSH_USER}" = "(unset)" ]; then
+    echo "ERROR: Could not automatically detect SSH username."
+    echo "Login with: gcloud auth login"
+    exit 1
+  fi
+fi
+
+SSH_TARGET="${SSH_USER}@${GCP_INSTANCE}"
+# Uses an explicit SSH target so Windows username spaces do not confuse gcloud.
+
 # Source: https://cloud.google.com/sdk/gcloud/reference/compute/instances/describe
 # Checks that the selected VM exists, is running, and has an external IP before deployment starts.
-VM_INFO="$(gcloud compute instances describe "${GCP_INSTANCE}" \
+echo "Checking VM status..."
+VM_INFO="$(run_with_timeout "${GCLOUD_QUICK_TIMEOUT}" gcloud compute instances describe "${GCP_INSTANCE}" \
   --zone "${GCP_ZONE}" \
   --project "${GCP_PROJECT}" \
   --format='value(status,networkInterfaces[0].accessConfigs[0].natIP)' 2>/dev/null || true)"
@@ -161,9 +191,13 @@ if [ -z "${VM_EXTERNAL_IP}" ]; then
   exit 1
 fi
 
+DIRECT_SSH_TARGET="${SSH_USER}@${VM_EXTERNAL_IP}"
+# Uses the VM external IP for direct SSH because the VM instance name is not a DNS hostname.
+
 # Source: https://cloud.google.com/sdk/gcloud/reference/compute/firewall-rules/list
 # Checks whether the project has a firewall rule that allows SSH on TCP port 22.
-SSH_FIREWALL_RULES="$(gcloud compute firewall-rules list \
+echo "Checking SSH firewall rules..."
+SSH_FIREWALL_RULES="$(run_with_timeout "${GCLOUD_QUICK_TIMEOUT}" gcloud compute firewall-rules list \
   --project "${GCP_PROJECT}" \
   --filter='allowed.tcp:22' \
   --format='value(name)' 2>/dev/null || true)"
@@ -174,15 +208,18 @@ if [ -z "${SSH_FIREWALL_RULES}" ]; then
 fi
 
 GCLOUD_TUNNEL_ARGS=()
+SSH_PORT="${SSH_PORT:-22}"
 if [ "${USE_IAP_TUNNEL}" = "true" ]; then
   GCLOUD_TUNNEL_ARGS=(--tunnel-through-iap)
+  IAP_LOCAL_PORT="${IAP_LOCAL_PORT:-2222}"
+  SSH_PORT="${IAP_LOCAL_PORT}"
 
   # Source: https://cloud.google.com/iap/docs/using-tcp-forwarding#create-firewall-rule
   # Ensures Google IAP can reach SSH on the VM through TCP port 22.
   IAP_FIREWALL_RULE="allow-iap-ssh"
-  if ! gcloud compute firewall-rules describe "${IAP_FIREWALL_RULE}" --project "${GCP_PROJECT}" >/dev/null 2>&1; then
+  if ! run_with_timeout "${GCLOUD_QUICK_TIMEOUT}" gcloud compute firewall-rules describe "${IAP_FIREWALL_RULE}" --project "${GCP_PROJECT}" >/dev/null 2>&1; then
     echo "Creating firewall rule for Google IAP SSH tunnel..."
-    if ! gcloud compute firewall-rules create "${IAP_FIREWALL_RULE}" \
+    if ! run_with_timeout "${GCLOUD_QUICK_TIMEOUT}" gcloud compute firewall-rules create "${IAP_FIREWALL_RULE}" \
       --project "${GCP_PROJECT}" \
       --direction=INGRESS \
       --action=ALLOW \
@@ -193,19 +230,35 @@ if [ "${USE_IAP_TUNNEL}" = "true" ]; then
       exit 1
     fi
   fi
+
+  IAP_TUNNEL_LOG="$(mktemp)"
+  # Source: https://cloud.google.com/sdk/gcloud/reference/compute/start-iap-tunnel
+  # Starts a local IAP TCP tunnel so this script can use normal ssh/scp instead of Windows plink.exe.
+  echo "Starting IAP tunnel on localhost:${IAP_LOCAL_PORT}..."
+  run_with_timeout "${GCLOUD_CONNECT_TIMEOUT}" gcloud compute start-iap-tunnel "${GCP_INSTANCE}" 22 \
+    --zone "${GCP_ZONE}" \
+    --project "${GCP_PROJECT}" \
+    --local-host-port="localhost:${IAP_LOCAL_PORT}" >"${IAP_TUNNEL_LOG}" 2>&1 &
+  IAP_TUNNEL_PID=$!
+  trap 'kill "${IAP_TUNNEL_PID:-}" >/dev/null 2>&1 || true; rm -f "${REMOTE_DEPLOY_SCRIPT:-}" "${IAP_TUNNEL_LOG:-}"' EXIT
+  sleep 5
 fi
 
 # Source: https://cloud.google.com/sdk/gcloud/reference/compute/ssh
 # Tests SSH connectivity before uploading files so failures show a clear root cause.
 echo "Checking SSH connectivity..."
-if ! SSH_CHECK_OUTPUT="$(gcloud compute ssh "${GCP_INSTANCE}" \
-  --zone "${GCP_ZONE}" \
-  --project "${GCP_PROJECT}" \
-  "${GCLOUD_TUNNEL_ARGS[@]}" \
-  --command 'echo SSH_OK' 2>&1)"; then
+if [ "${USE_IAP_TUNNEL}" = "true" ]; then
+  SSH_CHECK_COMMAND=(ssh -p "${SSH_PORT}" -o StrictHostKeyChecking=accept-new "${SSH_USER}@localhost" "echo SSH_OK")
+else
+  SSH_CHECK_COMMAND=(ssh -p "${SSH_PORT}" -o StrictHostKeyChecking=accept-new "${DIRECT_SSH_TARGET}" "echo SSH_OK")
+fi
+
+if ! SSH_CHECK_OUTPUT="$(run_with_timeout "${GCLOUD_CONNECT_TIMEOUT}" "${SSH_CHECK_COMMAND[@]}" 2>&1)"; then
   echo "ERROR: Could not connect to the VM using SSH."
   if printf '%s\n' "${SSH_CHECK_OUTPUT}" | grep -qi 'Connection timed out'; then
     echo "Reason: network timeout. IAP tunneling may be blocked, not enabled, or not allowed for your account."
+  elif printf '%s\n' "${SSH_CHECK_OUTPUT}" | grep -qi 'timed out'; then
+    echo "Reason: the SSH check took too long and was stopped by the script."
   elif printf '%s\n' "${SSH_CHECK_OUTPUT}" | grep -qi 'Permission denied'; then
     echo "Reason: SSH permission denied. Your Google Cloud account or SSH key is not allowed."
   elif printf '%s\n' "${SSH_CHECK_OUTPUT}" | grep -qi 'not found\|Could not fetch resource'; then
@@ -213,17 +266,23 @@ if ! SSH_CHECK_OUTPUT="$(gcloud compute ssh "${GCP_INSTANCE}" \
   else
     echo "Reason: SSH pre-check failed. Details:"
     printf '%s\n' "${SSH_CHECK_OUTPUT}"
+    if [ "${USE_IAP_TUNNEL}" = "true" ]; then
+      echo "IAP tunnel log:"
+      cat "${IAP_TUNNEL_LOG}" 2>/dev/null || true
+    fi
   fi
   exit 1
 fi
 
 echo "GCP instance : ${GCP_INSTANCE}"
+echo "SSH target   : ${DIRECT_SSH_TARGET}"
 echo "GCP zone     : ${GCP_ZONE}"
 echo "GCP project  : ${GCP_PROJECT}"
 echo "VM external IP: ${VM_EXTERNAL_IP}"
 echo "Install path : ${APP_DIR}"
 echo "Service name : ${SERVICE_NAME}"
 echo "IAP tunnel   : ${USE_IAP_TUNNEL}"
+echo "SSH port     : ${SSH_PORT}"
 echo "App command  : uvicorn ${APP_MODULE} --host ${APP_HOST} --port ${APP_PORT}"
 
 if [ ! -f "${APP_ENV_FILE}" ]; then
@@ -234,15 +293,25 @@ fi
 
 # Source: https://cloud.google.com/sdk/gcloud/reference/compute/scp
 # Copies the local .env file to /tmp first because writing directly to /opt usually needs sudo.
-gcloud compute scp "${APP_ENV_FILE}" "${GCP_INSTANCE}:/tmp/${SERVICE_NAME}.env" \
-  --zone "${GCP_ZONE}" \
-  --project "${GCP_PROJECT}" \
-  "${GCLOUD_TUNNEL_ARGS[@]}"
+echo "Uploading .env to VM..."
+if [ "${USE_IAP_TUNNEL}" = "true" ]; then
+  ENV_UPLOAD_COMMAND=(scp -P "${SSH_PORT}" "${APP_ENV_FILE}" "${SSH_USER}@localhost:/tmp/${SERVICE_NAME}.env")
+else
+  ENV_UPLOAD_COMMAND=(scp -P "${SSH_PORT}" "${APP_ENV_FILE}" "${DIRECT_SSH_TARGET}:/tmp/${SERVICE_NAME}.env")
+fi
+
+if ! ENV_UPLOAD_OUTPUT="$(run_with_timeout "${GCLOUD_CONNECT_TIMEOUT}" "${ENV_UPLOAD_COMMAND[@]}" 2>&1)"; then
+  echo "ERROR: Could not upload .env to the VM."
+  printf '%s\n' "${ENV_UPLOAD_OUTPUT}"
+  exit 1
+fi
 
 REMOTE_DEPLOY_SCRIPT="$(mktemp)"
 # Source: https://www.gnu.org/software/coreutils/manual/html_node/mktemp-invocation.html
 # Creates a temporary local script file so gcloud prompts and server commands use separate channels.
-trap 'rm -f "${REMOTE_DEPLOY_SCRIPT}"' EXIT
+if [ "${USE_IAP_TUNNEL}" != "true" ]; then
+  trap 'rm -f "${REMOTE_DEPLOY_SCRIPT}"' EXIT
+fi
 # Removes the temporary local script after deployment finishes or fails.
 
 cat >"${REMOTE_DEPLOY_SCRIPT}" <<REMOTE_SCRIPT
@@ -354,15 +423,32 @@ REMOTE_SCRIPT
 
 # Source: https://cloud.google.com/sdk/gcloud/reference/compute/scp
 # Uploads the generated remote install script to /tmp on the VM.
-gcloud compute scp "${REMOTE_DEPLOY_SCRIPT}" "${GCP_INSTANCE}:/tmp/${SERVICE_NAME}-deploy.sh" \
-  --zone "${GCP_ZONE}" \
-  --project "${GCP_PROJECT}" \
-  "${GCLOUD_TUNNEL_ARGS[@]}"
+echo "Uploading remote install script..."
+if [ "${USE_IAP_TUNNEL}" = "true" ]; then
+  SCRIPT_UPLOAD_COMMAND=(scp -P "${SSH_PORT}" "${REMOTE_DEPLOY_SCRIPT}" "${SSH_USER}@localhost:/tmp/${SERVICE_NAME}-deploy.sh")
+else
+  SCRIPT_UPLOAD_COMMAND=(scp -P "${SSH_PORT}" "${REMOTE_DEPLOY_SCRIPT}" "${DIRECT_SSH_TARGET}:/tmp/${SERVICE_NAME}-deploy.sh")
+fi
+
+if ! SCRIPT_UPLOAD_OUTPUT="$(run_with_timeout "${GCLOUD_CONNECT_TIMEOUT}" "${SCRIPT_UPLOAD_COMMAND[@]}" 2>&1)"; then
+  echo "ERROR: Could not upload remote install script to the VM."
+  printf '%s\n' "${SCRIPT_UPLOAD_OUTPUT}"
+  exit 1
+fi
 
 # Source: https://cloud.google.com/sdk/gcloud/reference/compute/ssh
 # Runs the uploaded install script on the VM without manually logging in to the server.
-gcloud compute ssh "${GCP_INSTANCE}" \
-  --zone "${GCP_ZONE}" \
-  --project "${GCP_PROJECT}" \
-  "${GCLOUD_TUNNEL_ARGS[@]}" \
-  --command "bash /tmp/${SERVICE_NAME}-deploy.sh"
+echo "Running remote deployment script..."
+if [ "${USE_IAP_TUNNEL}" = "true" ]; then
+  REMOTE_DEPLOY_COMMAND=(ssh -p "${SSH_PORT}" "${SSH_USER}@localhost" "bash /tmp/${SERVICE_NAME}-deploy.sh")
+else
+  REMOTE_DEPLOY_COMMAND=(ssh -p "${SSH_PORT}" "${DIRECT_SSH_TARGET}" "bash /tmp/${SERVICE_NAME}-deploy.sh")
+fi
+
+if ! REMOTE_DEPLOY_OUTPUT="$(run_with_timeout "${GCLOUD_DEPLOY_TIMEOUT}" "${REMOTE_DEPLOY_COMMAND[@]}" 2>&1)"; then
+  echo "ERROR: Remote deployment failed or timed out."
+  printf '%s\n' "${REMOTE_DEPLOY_OUTPUT}"
+  exit 1
+fi
+
+printf '%s\n' "${REMOTE_DEPLOY_OUTPUT}"
