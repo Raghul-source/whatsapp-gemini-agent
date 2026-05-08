@@ -246,8 +246,9 @@ diagnose_ssh_failure() {
     echo "Reason: SSH key/user authentication failed."
     echo "Fix: make sure your Google Cloud account can SSH to this VM, or set SSH_USER correctly in deploy.env."
   elif printf '%s\n' "${output}" | grep -qi 'Connection timed out\|Operation timed out'; then
-    echo "Reason: direct SSH port 22 is blocked or silently dropped by firewall/network."
-    echo "Fix: confirm a firewall rule allows tcp:22 from ${SSH_SOURCE_RANGE}, and check VPN/company network blocking."
+    echo "Reason: direct SSH port 22 is blocked or silently dropped."
+    echo "Fix 1: confirm an existing GCP firewall rule allows tcp:22 from ${SSH_SOURCE_RANGE}."
+    echo "Fix 2: if GCP firewall is already correct, try another network/mobile hotspot because VPN/company Wi-Fi may block outbound SSH."
   elif printf '%s\n' "${output}" | grep -qi 'Connection refused'; then
     echo "Reason: the VM is reachable, but SSH service is not accepting connections on port ${SSH_PORT}."
     echo "Fix: check sshd on the VM."
