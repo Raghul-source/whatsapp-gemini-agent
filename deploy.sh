@@ -3,6 +3,14 @@
 set -euo pipefail
 # Safety feature: stops the script immediately if an error occurs or a required variable is missing.
 
+DEPLOY_CONFIG="${DEPLOY_CONFIG:-./deploy.env}"
+# Reads deploy.env at the beginning so its values take priority over script fallbacks and auto-detection.
+if [ -f "${DEPLOY_CONFIG}" ]; then
+  # Source: https://www.gnu.org/software/bash/manual/bash.html#index-source
+  # shellcheck disable=SC1090
+  source "${DEPLOY_CONFIG}"
+fi
+
 # ==============================================================================
 # Deploy WhatsApp Gemini Agent from a laptop to a Google Cloud Compute Engine VM.
 #
@@ -13,15 +21,6 @@ set -euo pipefail
 #   cp deploy.env.example deploy.env
 #   # edit deploy.env only when auto-detection is not enough
 # ==============================================================================
-
-DEPLOY_CONFIG="${DEPLOY_CONFIG:-./deploy.env}"
-# Defines the local input file that stores project/server-specific deployment values.
-if [ -f "${DEPLOY_CONFIG}" ]; then
-  # Source: https://www.gnu.org/software/bash/manual/bash.html#index-source
-  # Loads deployment input values first. Values from deploy.env take priority over auto-detection.
-  # shellcheck disable=SC1090
-  source "${DEPLOY_CONFIG}"
-fi
 
 # Initialize empty as a fallback. If deploy.env does not provide the VM name,
 # the script will try to auto-detect it from Compute Engine later.
@@ -186,6 +185,9 @@ if [ -z "${SSH_USER}" ]; then
   fi
 fi
 
+SSH_TARGET="${SSH_USER}@${GCP_INSTANCE}"
+# Uses the configured SSH user with the VM instance name for gcloud-managed SSH key sync.
+
 # Source: https://cloud.google.com/sdk/gcloud/reference/compute/instances/describe
 # Checks that the selected VM exists, is running, and has an external IP before deployment starts.
 echo "Checking VM status..."
@@ -264,10 +266,26 @@ diagnose_ssh_failure() {
   fi
 }
 
+echo "Auto-syncing Google Cloud SSH keys..."
+# Source: https://cloud.google.com/sdk/gcloud/reference/compute/ssh
+# Uses gcloud once to add/sync the Google-managed SSH key for the resolved VM user.
+if ! KEY_SYNC_OUTPUT="$(run_with_timeout "${GCLOUD_CONNECT_TIMEOUT}" gcloud compute ssh "${SSH_TARGET}" \
+  --zone="${GCP_ZONE}" \
+  --project="${GCP_PROJECT}" \
+  --command="echo 'Keys synced successfully!'" \
+  --strict-host-key-checking=no \
+  --quiet 2>&1)"; then
+  echo "WARNING: Google Cloud SSH key sync did not complete."
+  echo "The script will still try direct SSH next and print the real connection error if it fails."
+  printf '%s\n' "${KEY_SYNC_OUTPUT}"
+else
+  printf '%s\n' "${KEY_SYNC_OUTPUT}"
+fi
+
 # Source: https://man.openbsd.org/ssh
 # Tests direct SSH connectivity with verbose output so failures identify blocked ports, bad keys, or network drops.
 echo "Checking SSH connectivity..."
-SSH_CHECK_COMMAND=(ssh -vvv -p "${SSH_PORT}" \
+SSH_CHECK_COMMAND=(ssh -i ~/.ssh/google_compute_engine -vvv -p "${SSH_PORT}" \
   -o BatchMode=yes \
   -o ConnectTimeout=45 \
   -o StrictHostKeyChecking=accept-new \
@@ -300,7 +318,7 @@ fi
 # Source: https://man.openbsd.org/scp
 # Copies the local .env file to /tmp first because writing directly to /opt usually needs sudo.
 echo "Uploading .env to VM..."
-if ! ENV_UPLOAD_OUTPUT="$(run_with_timeout "${GCLOUD_CONNECT_TIMEOUT}" scp -P "${SSH_PORT}" "${APP_ENV_FILE}" "${DIRECT_SSH_TARGET}:/tmp/${SERVICE_NAME}.env" 2>&1)"; then
+if ! ENV_UPLOAD_OUTPUT="$(run_with_timeout "${GCLOUD_CONNECT_TIMEOUT}" scp -i ~/.ssh/google_compute_engine -P "${SSH_PORT}" "${APP_ENV_FILE}" "${DIRECT_SSH_TARGET}:/tmp/${SERVICE_NAME}.env" 2>&1)"; then
   echo "ERROR: Could not upload .env to the VM."
   diagnose_ssh_failure "${ENV_UPLOAD_OUTPUT}"
   exit 1
@@ -403,7 +421,7 @@ REMOTE_SCRIPT
 # Source: https://man.openbsd.org/scp
 # Uploads the generated remote install script to /tmp on the VM.
 echo "Uploading remote install script..."
-if ! SCRIPT_UPLOAD_OUTPUT="$(run_with_timeout "${GCLOUD_CONNECT_TIMEOUT}" scp -P "${SSH_PORT}" "${REMOTE_DEPLOY_SCRIPT}" "${DIRECT_SSH_TARGET}:/tmp/${SERVICE_NAME}-deploy.sh" 2>&1)"; then
+if ! SCRIPT_UPLOAD_OUTPUT="$(run_with_timeout "${GCLOUD_CONNECT_TIMEOUT}" scp -i ~/.ssh/google_compute_engine -P "${SSH_PORT}" "${REMOTE_DEPLOY_SCRIPT}" "${DIRECT_SSH_TARGET}:/tmp/${SERVICE_NAME}-deploy.sh" 2>&1)"; then
   echo "ERROR: Could not upload remote install script to the VM."
   diagnose_ssh_failure "${SCRIPT_UPLOAD_OUTPUT}"
   exit 1
@@ -412,7 +430,7 @@ fi
 # Source: https://man.openbsd.org/ssh
 # Runs the uploaded install script on the VM without manually logging in to the server.
 echo "Running remote deployment script..."
-if ! REMOTE_DEPLOY_OUTPUT="$(run_with_timeout "${GCLOUD_DEPLOY_TIMEOUT}" ssh -p "${SSH_PORT}" "${DIRECT_SSH_TARGET}" "bash /tmp/${SERVICE_NAME}-deploy.sh" 2>&1)"; then
+if ! REMOTE_DEPLOY_OUTPUT="$(run_with_timeout "${GCLOUD_DEPLOY_TIMEOUT}" ssh -i ~/.ssh/google_compute_engine -p "${SSH_PORT}" "${DIRECT_SSH_TARGET}" "bash /tmp/${SERVICE_NAME}-deploy.sh" 2>&1)"; then
   echo "ERROR: Remote deployment failed or timed out."
   printf '%s\n' "${REMOTE_DEPLOY_OUTPUT}"
   exit 1
