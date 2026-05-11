@@ -430,7 +430,7 @@ fi
 # Source: https://man.openbsd.org/ssh
 # Runs the uploaded install script on the VM without manually logging in to the server.
 echo "Running remote deployment script..."
-if ! REMOTE_DEPLOY_OUTPUT="$(run_with_timeout "${GCLOUD_DEPLOY_TIMEOUT}" ssh -i ~/.ssh/google_compute_engine -p "${SSH_PORT}" "${DIRECT_SSH_TARGET}" "bash /tmp/${SERVICE_NAME}-deploy.sh" 2>&1)"; then
+if ! REMOTE_DEPLOY_OUTPUT="$(run_with_timeout "${GCLOUD_DEPLOY_TIMEOUT}" ssh -o ServerAliveInterval=60 -i ~/.ssh/google_compute_engine -p "${SSH_PORT}" "${DIRECT_SSH_TARGET}" "bash /tmp/${SERVICE_NAME}-deploy.sh" 2>&1)"; then
   echo "ERROR: Remote deployment failed or timed out."
   printf '%s\n' "${REMOTE_DEPLOY_OUTPUT}"
   exit 1
