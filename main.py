@@ -27,6 +27,10 @@ import requests
 from agent import whatsapp_agent
 
 
+# Source: https://cloud.google.com/vertex-ai/docs/python-sdk/use-vertex-ai-python-sdk
+import vertexai
+# Used to initialize the Vertex AI SDK with the project and location from .env before AdkApp starts.
+
 
 # ==============================================================================
 # ADK App connects our ADK agent to Agent Platform session handling.
@@ -53,6 +57,10 @@ AGENT_ENGINE_ID = get_required_env("AGENT_ENGINE_ID")
 # Source: https://google.github.io/adk-docs/get-started/quickstart/
 # Tell ADK/GenAI to use the Google Cloud Vertex AI backend.
 os.environ.setdefault("GOOGLE_GENAI_USE_VERTEXAI", "TRUE")
+
+# Source: https://cloud.google.com/vertex-ai/docs/python-sdk/use-vertex-ai-python-sdk
+# Give Vertex AI / AdkApp the project and location loaded from .env.
+vertexai.init(project=GCP_PROJECT_ID, location=LOCATION_ID)
 
 # Source: https://fastapi.tiangolo.com/tutorial/first-steps/
 app = FastAPI(title="WhatsApp Gemini Agent Webhook")
